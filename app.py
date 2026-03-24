@@ -26,6 +26,7 @@ CHUNK_OVERLAP = 180
 TOP_RETRIEVAL_CHUNKS = 5
 SUMMARY_SENTENCES = 3
 KEYWORD_LIMIT = 6
+FALLBACK_SECTION_COUNT = 4
 
 STOPWORDS = {
     "a",
@@ -61,9 +62,47 @@ STOPWORDS = {
 
 QUESTION_WORDS = {"what", "when", "where", "which", "who", "why", "how", "define", "explain"}
 
+SECTION_DEFINITIONS = [
+    {
+        "id": "introduction",
+        "title": "Introduction",
+        "icon": "book",
+        "patterns": [r"\bintroduction\b", r"\boverview\b", r"\babstract\b"],
+    },
+    {
+        "id": "methodology",
+        "title": "Methodology",
+        "icon": "science",
+        "patterns": [r"\bmethodology\b", r"\bmethods?\b", r"\bapproach\b"],
+    },
+    {
+        "id": "key-findings",
+        "title": "Key Findings",
+        "icon": "insights",
+        "patterns": [r"\bkey findings\b", r"\bfindings\b", r"\bresults?\b", r"\bdiscussion\b"],
+    },
+    {
+        "id": "conclusion",
+        "title": "Conclusion",
+        "icon": "analytics",
+        "patterns": [r"\bconclusion\b", r"\bsummary\b", r"\bclosing\b", r"\brecommendations?\b"],
+    },
+]
+
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR = BASE_DIR / "templates"
+
+
+@dataclass
+class DocumentSection:
+    section_id: str
+    title: str
+    icon: str
+    text: str
+    excerpt: str
+    keywords: list[str]
+    detected: bool
 
 
 @dataclass
@@ -79,11 +118,13 @@ class StoredDocument:
     doc_type: str
     snapshot_sentences: list[str]
     keywords: list[str]
+    sections: list[DocumentSection]
 
 
 class AskRequest(BaseModel):
     document_id: str
     question: str
+    section_id: str | None = None
 
 
 documents: dict[str, StoredDocument] = {}
@@ -384,6 +425,105 @@ def build_extractive_snapshot(text: str, sentence_limit: int = SUMMARY_SENTENCES
     return [sentence for _, _, sentence in sorted(top_sentences, key=lambda item: item[1])]
 
 
+def fallback_section_texts(text: str) -> list[str]:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    if not paragraphs:
+        return [text] * FALLBACK_SECTION_COUNT if text else [""] * FALLBACK_SECTION_COUNT
+
+    chunk_size = max(1, math.ceil(len(paragraphs) / FALLBACK_SECTION_COUNT))
+    grouped = []
+    for index in range(FALLBACK_SECTION_COUNT):
+        start = index * chunk_size
+        end = start + chunk_size
+        grouped.append("\n\n".join(paragraphs[start:end]).strip())
+
+    filled = [group for group in grouped if group]
+    if not filled:
+        return [""] * FALLBACK_SECTION_COUNT
+
+    while len(filled) < FALLBACK_SECTION_COUNT:
+        filled.append(filled[-1])
+    return filled[:FALLBACK_SECTION_COUNT]
+
+
+def find_section_span(text: str, patterns: list[str]):
+    candidates = []
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            candidates.append(match.start())
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def strip_section_heading(section_text: str, title: str) -> str:
+    lines = [line.strip() for line in section_text.splitlines()]
+    if not lines:
+        return section_text
+
+    title_pattern = re.compile(rf"^{re.escape(title)}\b[:\-\s]*$", flags=re.IGNORECASE)
+    first_line = lines[0]
+    if title_pattern.match(first_line):
+        cleaned = "\n".join(lines[1:]).strip()
+        return cleaned or section_text.strip()
+    return section_text.strip()
+
+
+def detect_document_sections(text: str) -> list[DocumentSection]:
+    fallback_texts = fallback_section_texts(text)
+    positions = []
+
+    for definition in SECTION_DEFINITIONS:
+        position = find_section_span(text, definition["patterns"])
+        if position is not None:
+            positions.append((position, definition))
+
+    positions.sort(key=lambda item: item[0])
+    spans: dict[str, tuple[int, int]] = {}
+    for index, (start, definition) in enumerate(positions):
+        end = len(text)
+        if index + 1 < len(positions):
+            end = positions[index + 1][0]
+        spans[definition["id"]] = (start, end)
+
+    sections = []
+    for fallback_index, definition in enumerate(SECTION_DEFINITIONS):
+        span = spans.get(definition["id"])
+        detected = span is not None
+        if detected:
+            section_text = text[span[0]:span[1]].strip()
+        else:
+            section_text = fallback_texts[fallback_index].strip()
+        if not section_text:
+            section_text = text[:MAX_CHUNK_CHARS].strip()
+        section_text = strip_section_heading(section_text, definition["title"])
+
+        snapshot = build_extractive_snapshot(section_text, sentence_limit=1)
+        sections.append(
+            DocumentSection(
+                section_id=definition["id"],
+                title=definition["title"],
+                icon=definition["icon"],
+                text=section_text,
+                excerpt=snapshot[0] if snapshot else section_text[:220].strip(),
+                keywords=extract_keywords(section_text, limit=3),
+                detected=detected,
+            )
+        )
+
+    return sections
+
+
+def get_document_section(document: StoredDocument, section_id: str | None):
+    if not section_id:
+        return None
+    for section in document.sections:
+        if section.section_id == section_id:
+            return section
+    return None
+
+
 def serialize_document(document: StoredDocument) -> dict:
     return {
         "document_id": document.document_id,
@@ -394,13 +534,24 @@ def serialize_document(document: StoredDocument) -> dict:
         "read_minutes": document.read_minutes,
         "snapshot_sentences": document.snapshot_sentences,
         "keywords": document.keywords,
+        "sections": [
+            {
+                "section_id": section.section_id,
+                "title": section.title,
+                "icon": section.icon,
+                "excerpt": section.excerpt,
+                "keywords": section.keywords,
+                "detected": section.detected,
+            }
+            for section in document.sections
+        ],
         "preview_url": f"/api/document/{document.document_id}/file",
     }
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 
 @app.post("/api/upload")
@@ -426,6 +577,7 @@ async def upload_document(file: UploadFile = File(...)):
         doc_type=parsed["type"],
         snapshot_sentences=build_extractive_snapshot(parsed["text"]),
         keywords=extract_keywords(parsed["text"]),
+        sections=detect_document_sections(parsed["text"]),
     )
     documents[document_id] = stored
     return JSONResponse(serialize_document(stored))
@@ -439,13 +591,24 @@ async def ask_document_question(payload: AskRequest):
     if not payload.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    result = ask_question(document.text, payload.question)
+    active_section = get_document_section(document, payload.section_id)
+    question_context = active_section.text if active_section and active_section.text.strip() else document.text
+    result = ask_question(question_context, payload.question)
+    snapshot_sentences = build_extractive_snapshot(question_context)
+    keywords = extract_keywords(question_context)
+
     return JSONResponse(
         {
             "question": payload.question,
             "result": result,
-            "snapshot_sentences": document.snapshot_sentences,
-            "keywords": document.keywords,
+            "snapshot_sentences": snapshot_sentences,
+            "keywords": keywords,
+            "active_section": {
+                "section_id": active_section.section_id,
+                "title": active_section.title,
+            }
+            if active_section
+            else None,
         }
     )
 

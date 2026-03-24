@@ -21,11 +21,27 @@
 
         .grainy-surface {
             background-image: url(https://lh3.googleusercontent.com/aida-public/AB6AXuAGcGpsG3ie_Sbvbuv2Jhs7OEhggOV_hCsCYDULaqJNXEQieyTqfEs3WcjepORLHPV5y2D2Jbp1DJtp0M0FULH1Bz7ObQo1UiWuwFGVJBzQmJRDsty-SCtx_6GpGzJGiFAoJR5mlaA88fgIXAEPSYdNNhxO0HK_H3jZgZvbPm5rPFdT3FarO1u0vBJ_p52AReysB9_k-F_MoAAriEk94TtYVWZKBGL5MC0Uxjl-reXacI0fiqrrdsOiIrmlcPSWKxVy81BtnF2cElU);
-            background-repeat: repeat;
+            background-repeat: no-repeat;
+            background-position: center top;
+            background-size: cover;
         }
 
         .hidden-input {
             display: none;
+        }
+
+        .chapter-item {
+            transition: all 160ms ease;
+        }
+
+        .chapter-item.active {
+            background: #ffffff;
+            color: #000007;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+        }
+
+        .chapter-item.inactive {
+            color: #5d5e61;
         }
 
         .status-chip.busy .status-dot {
@@ -160,23 +176,23 @@
                 <h2 class="font-sans text-lg text-[#000007]">Chapters</h2>
                 <p class="font-label text-xs text-secondary opacity-70">Document structure</p>
             </div>
-            <div class="flex-1 space-y-1">
-                <div class="bg-[#FFFFFF] text-[#000007] rounded-md mx-2 py-3 px-4 shadow-sm flex items-center gap-3 cursor-pointer group">
-                    <span class="material-symbols-outlined text-sm">book</span>
-                    <span class="font-sans font-medium text-sm">Introduction</span>
-                </div>
-                <div class="text-[#5D5E61] py-3 px-4 mx-2 flex items-center gap-3 cursor-pointer hover:bg-[#FFFFFF]/50 transition-all group">
-                    <span class="material-symbols-outlined text-sm">science</span>
-                    <span class="font-sans text-sm">Methodology</span>
-                </div>
-                <div class="text-[#5D5E61] py-3 px-4 mx-2 flex items-center gap-3 cursor-pointer hover:bg-[#FFFFFF]/50 transition-all group">
-                    <span class="material-symbols-outlined text-sm">insights</span>
-                    <span class="font-sans text-sm">Key Findings</span>
-                </div>
-                <div class="text-[#5D5E61] py-3 px-4 mx-2 flex items-center gap-3 cursor-pointer hover:bg-[#FFFFFF]/50 transition-all group">
-                    <span class="material-symbols-outlined text-sm">analytics</span>
-                    <span class="font-sans text-sm">Conclusion</span>
-                </div>
+            <div class="flex-1 space-y-1" id="chapters-list">
+                <button class="chapter-item active bg-[#FFFFFF] text-[#000007] rounded-md mx-2 py-3 px-4 shadow-sm flex items-center gap-3 cursor-pointer group w-[calc(100%-1rem)] text-left" data-default-title="Introduction" data-section-id="introduction" type="button">
+                    <span class="material-symbols-outlined text-sm chapter-icon">book</span>
+                    <span class="font-sans font-medium text-sm chapter-title">Introduction</span>
+                </button>
+                <button class="chapter-item inactive py-3 px-4 mx-2 flex items-center gap-3 cursor-pointer hover:bg-[#FFFFFF]/50 rounded-md group w-[calc(100%-1rem)] text-left" data-default-title="Methodology" data-section-id="methodology" type="button">
+                    <span class="material-symbols-outlined text-sm chapter-icon">science</span>
+                    <span class="font-sans text-sm chapter-title">Methodology</span>
+                </button>
+                <button class="chapter-item inactive py-3 px-4 mx-2 flex items-center gap-3 cursor-pointer hover:bg-[#FFFFFF]/50 rounded-md group w-[calc(100%-1rem)] text-left" data-default-title="Key Findings" data-section-id="key-findings" type="button">
+                    <span class="material-symbols-outlined text-sm chapter-icon">insights</span>
+                    <span class="font-sans text-sm chapter-title">Key Findings</span>
+                </button>
+                <button class="chapter-item inactive py-3 px-4 mx-2 flex items-center gap-3 cursor-pointer hover:bg-[#FFFFFF]/50 rounded-md group w-[calc(100%-1rem)] text-left" data-default-title="Conclusion" data-section-id="conclusion" type="button">
+                    <span class="material-symbols-outlined text-sm chapter-icon">analytics</span>
+                    <span class="font-sans text-sm chapter-title">Conclusion</span>
+                </button>
             </div>
             <div class="mt-auto px-4 space-y-1">
                 <button class="w-full py-3 px-4 mb-4 bg-primary text-on-primary font-label text-sm rounded-full flex items-center justify-center gap-2 hover:opacity-90 transition-opacity" id="upload-button" type="button">

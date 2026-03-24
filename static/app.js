@@ -4,6 +4,8 @@
         previewUrl: "#",
         answerText: "",
         answerSnippet: "",
+        selectedSectionId: "introduction",
+        sections: [],
     };
 
     const elements = {
@@ -29,6 +31,7 @@
         feedbackBanner: document.getElementById("feedback-banner"),
         copyAnswer: document.getElementById("copy-answer"),
         dropZone: document.getElementById("supporting-drop"),
+        chapterItems: Array.from(document.querySelectorAll(".chapter-item")),
     };
 
     function escapeHtml(value) {
@@ -85,6 +88,48 @@
             .join("");
     }
 
+    function sectionById(sectionId) {
+        return state.sections.find((section) => section.section_id === sectionId) || null;
+    }
+
+    function setActiveChapter(sectionId, announce) {
+        state.selectedSectionId = sectionId;
+        elements.chapterItems.forEach((item) => {
+            const isActive = item.dataset.sectionId === sectionId;
+            item.classList.toggle("active", isActive);
+            item.classList.toggle("inactive", !isActive);
+        });
+
+        const activeSection = sectionById(sectionId);
+        if (activeSection) {
+            elements.analysisSubtitle.textContent = `${activeSection.title} focus`;
+            elements.relatedContext.textContent = activeSection.excerpt || "No excerpt available for this section yet.";
+            elements.refineCopy.textContent = activeSection.keywords && activeSection.keywords.length
+                ? `Transformer focus: ${activeSection.keywords.join(", ")}.`
+                : `Transformer focus on ${activeSection.title.toLowerCase()}.`;
+            renderAnnotations([activeSection.excerpt].filter(Boolean));
+            if (announce) {
+                showBanner(`Selected ${activeSection.title}.`, false);
+            }
+        }
+    }
+
+    function renderSections(sections) {
+        state.sections = sections || [];
+        elements.chapterItems.forEach((item) => {
+            const section = state.sections.find((entry) => entry.section_id === item.dataset.sectionId);
+            const titleNode = item.querySelector(".chapter-title");
+            const iconNode = item.querySelector(".chapter-icon");
+            titleNode.textContent = section ? section.title : item.dataset.defaultTitle;
+            if (section && section.icon) {
+                iconNode.textContent = section.icon;
+            }
+        });
+
+        const preferredSection = sectionById(state.selectedSectionId) ? state.selectedSectionId : "introduction";
+        setActiveChapter(preferredSection, false);
+    }
+
     function renderAnnotations(items) {
         const notes = items.slice(0, 2);
         if (!notes.length) {
@@ -125,16 +170,20 @@
         elements.documentType.textContent = `${payload.type} Document`;
         elements.previewLink.href = payload.preview_url;
 
+        renderSections(payload.sections || []);
+
         const keywords = payload.keywords || [];
         const snapshots = payload.snapshot_sentences || [];
-        elements.analysisSubtitle.textContent = keywords.length
-            ? `Focus on ${keywords.slice(0, 2).join(" and ")}`
-            : "Key insights from uploaded document";
-        elements.relatedContext.textContent = snapshots[0] || "Ask a question to generate related context.";
-        elements.refineCopy.textContent = keywords.length
-            ? `Automate a summary for ${keywords.slice(0, 3).join(", ")}.`
-            : "Automate a summary of the most relevant citations in this document.";
-        renderAnnotations(snapshots);
+        if (!state.sections.length) {
+            elements.analysisSubtitle.textContent = keywords.length
+                ? `Focus on ${keywords.slice(0, 2).join(" and ")}`
+                : "Key insights from uploaded document";
+            elements.relatedContext.textContent = snapshots[0] || "Ask a question to generate related context.";
+            elements.refineCopy.textContent = keywords.length
+                ? `Automate a summary for ${keywords.slice(0, 3).join(", ")}.`
+                : "Automate a summary of the most relevant citations in this document.";
+            renderAnnotations(snapshots);
+        }
     }
 
     function updateAnswer(resultPayload, snapshots, keywords) {
@@ -151,9 +200,13 @@
         elements.verificationLabel.textContent = result.confidence
             ? `${result.confidence} confidence transformer answer`
             : "Verified against uploaded document";
-        if (keywords && keywords.length) {
+        if (resultPayload.active_section) {
+            elements.analysisSubtitle.textContent = `${resultPayload.active_section.title} analysis`;
+        } else if (keywords && keywords.length) {
             elements.analysisSubtitle.textContent = `Focus on ${keywords.slice(0, 2).join(" and ")}`;
         }
+        elements.relatedContext.textContent = snapshots[0] || elements.relatedContext.textContent;
+        renderAnnotations(snapshots);
     }
 
     async function uploadFile(file) {
@@ -197,6 +250,7 @@
                 body: JSON.stringify({
                     document_id: state.documentId,
                     question,
+                    section_id: state.selectedSectionId,
                 }),
             });
             const payload = await response.json();
@@ -232,6 +286,16 @@
             return;
         }
         askQuestion(question);
+    });
+
+    elements.chapterItems.forEach((item) => {
+        item.addEventListener("click", () => {
+            if (!state.documentId) {
+                showBanner("Upload a document first.", true);
+                return;
+            }
+            setActiveChapter(item.dataset.sectionId, true);
+        });
     });
 
     elements.copyAnswer.addEventListener("click", async () => {
