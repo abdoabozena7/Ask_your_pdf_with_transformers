@@ -13,6 +13,8 @@ The app now uses a three-column workspace instead of Streamlit:
 
 The current visual direction matches the new `Lexicon Archival` layout shown in the latest UI update.
 
+![Current UI](Picture1.png)
+
 ## Features
 
 - Upload PDF and TXT files from the browser
