@@ -30,6 +30,17 @@
             display: none;
         }
 
+        .scrollbar-hidden {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+
+        .scrollbar-hidden::-webkit-scrollbar {
+            display: none;
+            width: 0;
+            height: 0;
+        }
+
         .chapter-item {
             transition: all 160ms ease;
         }
@@ -211,7 +222,7 @@
             </div>
         </nav>
 
-        <main class="ml-64 flex-1 overflow-y-auto px-12 py-8 bg-surface grainy-surface">
+        <main class="scrollbar-hidden ml-64 flex-1 overflow-y-auto px-12 py-8 bg-surface grainy-surface rounded-[20px]">
             <div class="max-w-4xl mx-auto space-y-12 pb-24">
                 <section class="bg-surface-container-lowest p-8 rounded-xl ring-1 ring-outline-variant/10 flex items-center justify-between gap-6 flex-wrap">
                     <div class="flex items-center gap-6 min-w-0">
