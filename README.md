@@ -1,38 +1,44 @@
 # Document QA System
-A Document Question Answering System built with Transformers and Streamlit, allowing users to upload PDF or TXT files and ask questions about their content. The system can detect chapters and answer questions based on specific sections for more accurate results.
+This project is now a FastAPI-based document question answering app with a static HTML frontend. Users can upload PDF or TXT files, preview the processed document, and ask transformer-powered questions against its contents.
 
 ## Features
-- Upload PDF or TXT documents.
-- Automatically splits text into chapters for better QA accuracy.
-- Ask any question and get relevant answers using a pretrained Transformers QA model (distilbert-base-cased-distilled-squad).
-- Beautiful and interactive Streamlit UI with styled answers and chapter sidebar.
-- Works with both short and long documents.
-- Easy to extend with RAG/FAISS for larger datasets in the future.
+- Upload PDF or TXT documents from the browser.
+- Parse document text with `PyPDF2` for PDFs and plain decoding for text files.
+- Ask questions with `distilbert-base-cased-distilled-squad` using a FastAPI backend.
+- Use the provided archival-style HTML interface instead of Streamlit.
+- Preview the uploaded source file directly from the UI.
 
-## streamlit run app.py
-1. Upload a PDF or TXT file.
-2. Enter your question in the input box.
-3. Get the answer displayed in a styled box.
-4. Optional: check the sidebar to see chapters in the document.
+## Run
+Install the required packages first:
+
+```bash
+pip install fastapi uvicorn python-multipart transformers torch PyPDF2 jinja2
+```
+
+Start the app:
+
+```bash
+uvicorn app:app --reload
+```
+
+Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
 ## Project Structure
-- Document_QA_System/
-  - app.py
-  - README.md
-  - example.pdf
+- `app.py`: FastAPI backend and transformer QA pipeline
+- `templates/index.html`: frontend markup and Tailwind-based layout
+- `static/app.js`: client-side upload and question flow
 
 ## Technologies Used
 - Python 3.10+
-- Transformers (Hugging Face)
+- FastAPI
+- Jinja2 templates
+- Transformers
 - PyTorch
-- Streamlit
-- PyPDF2 (PDF reading)
+- PyPDF2
+- Tailwind CSS CDN
 
 ## Future Improvements
-- Integrate RAG + FAISS for large document QA.
-- Highlight answers directly in the PDF text.
-- Add multi-language support.
-- Improve UI with interactive elements for selecting chapters/questions.
-
-## Screenshot
-![Description](Picture1.png)
+- Persist uploaded documents instead of storing them in memory.
+- Add citation highlighting and page anchoring.
+- Add retrieval indexing for larger documents.
+- Replace placeholder chapter labels with real structural extraction.

@@ -1,9 +1,19 @@
+import io
+import math
 import re
+import uuid
 from collections import Counter
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 import PyPDF2
-import streamlit as st
 import torch
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 from transformers import AutoModelForQuestionAnswering, AutoTokenizer
 
 MODEL_NAME = "distilbert-base-cased-distilled-squad"
@@ -14,6 +24,8 @@ TOP_K = 8
 MAX_CHUNK_CHARS = 1200
 CHUNK_OVERLAP = 180
 TOP_RETRIEVAL_CHUNKS = 5
+SUMMARY_SENTENCES = 3
+KEYWORD_LIMIT = 6
 
 STOPWORDS = {
     "a",
@@ -33,8 +45,11 @@ STOPWORDS = {
     "of",
     "on",
     "or",
+    "that",
     "the",
+    "this",
     "to",
+    "was",
     "what",
     "when",
     "where",
@@ -45,29 +60,48 @@ STOPWORDS = {
 }
 
 QUESTION_WORDS = {"what", "when", "where", "which", "who", "why", "how", "define", "explain"}
-LOW_SIGNAL_ANSWERS = {
-    "",
-    "test",
-    "chapter",
-    "section",
-    "figure",
-    "table",
-    "page",
-    "example",
-}
+
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+TEMPLATES_DIR = BASE_DIR / "templates"
 
 
-@st.cache_resource(show_spinner=False)
+@dataclass
+class StoredDocument:
+    document_id: str
+    name: str
+    media_type: str
+    file_bytes: bytes
+    text: str
+    page_count: int
+    word_count: int
+    read_minutes: int
+    doc_type: str
+    snapshot_sentences: list[str]
+    keywords: list[str]
+
+
+class AskRequest(BaseModel):
+    document_id: str
+    question: str
+
+
+documents: dict[str, StoredDocument] = {}
+
+app = FastAPI(title="Ask Your PDF with Transformers")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+@lru_cache(maxsize=1)
 def load_qa_model():
-    """Loads the QA model once and reuses it across Streamlit reruns."""
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForQuestionAnswering.from_pretrained(MODEL_NAME)
     model.eval()
     return tokenizer, model
 
 
-def normalize_text(text):
-    """Cleans common PDF extraction issues while preserving section structure."""
+def normalize_text(text: str) -> str:
     text = text.replace("\r", "\n")
     text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
     text = re.sub(r"[ \t]+", " ", text)
@@ -75,73 +109,61 @@ def normalize_text(text):
     return text.strip()
 
 
-def read_pdf(file_path):
-    """Reads a PDF file and returns cleaned text."""
-    pdf = PyPDF2.PdfReader(file_path)
-    pages = []
-
-    for page in pdf.pages:
-        page_text = page.extract_text()
-        if page_text:
-            pages.append(page_text)
-
-    return normalize_text("\n\n".join(pages))
-
-
-def split_chapters(text):
-    """
-    Splits text into chapters based on "Chapter X" headings.
-    Returns a dict: { "Chapter 1": "text", "Chapter 2": "text", ... }
-    """
-    chapters = {}
-    current_chapter = None
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        if re.match(r"^Chapter\s+\d+", line, re.IGNORECASE):
-            current_chapter = re.split(r"\s(?:-|\u2014)\s", line, maxsplit=1)[0].strip()
-            chapters[current_chapter] = line + "\n"
-            continue
-
-        if current_chapter:
-            chapters[current_chapter] += line + "\n"
-
-    return {name: normalize_text(content) for name, content in chapters.items()}
-
-
-def tokenize_terms(text):
+def tokenize_terms(text: str) -> list[str]:
     return [token for token in re.findall(r"[a-zA-Z0-9]+", text.lower()) if token not in STOPWORDS]
 
 
-def normalize_question(question):
-    """Turns shorthand prompts into a question the QA model can handle better."""
+def normalize_question(question: str) -> str:
     question = question.strip()
     lowered = question.lower()
     terms = tokenize_terms(question)
 
     if not question:
         return question
-
     if question.endswith("?"):
         return question
-
     if any(word in lowered.split() for word in QUESTION_WORDS):
         return question
-
     if len(terms) <= 6:
         return f"What is {question}?"
-
     return question
 
 
-def chunk_text(text, max_chars=MAX_CHUNK_CHARS, overlap=CHUNK_OVERLAP):
-    """Builds overlapping chunks, preferring paragraph boundaries."""
+def parse_document(file_name: str, file_type: str, file_bytes: bytes) -> dict:
+    is_pdf = file_type == "application/pdf" or file_name.lower().endswith(".pdf")
+
+    if is_pdf:
+        reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+        pages = []
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                pages.append(page_text)
+        text = normalize_text("\n\n".join(pages))
+        page_count = len(reader.pages)
+        doc_type = "PDF"
+    else:
+        text = normalize_text(file_bytes.decode("utf-8", errors="ignore"))
+        page_count = max(1, math.ceil(len(text) / 2500))
+        doc_type = "TXT"
+
+    word_count = len(text.split())
+    read_minutes = max(1, math.ceil(word_count / 220)) if text else 1
+
+    return {
+        "name": file_name,
+        "type": doc_type,
+        "text": text,
+        "page_count": page_count,
+        "word_count": word_count,
+        "read_minutes": read_minutes,
+    }
+
+
+def chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> list[str]:
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
     if not paragraphs:
-        return [text]
+        return [text] if text else []
 
     chunks = []
     current = ""
@@ -171,11 +193,10 @@ def chunk_text(text, max_chars=MAX_CHUNK_CHARS, overlap=CHUNK_OVERLAP):
     if current:
         chunks.append(current)
 
-    return chunks or [text]
+    return chunks
 
 
-def score_text_match(text, question, question_terms):
-    """Scores how relevant a chunk or sentence is for the question."""
+def score_text_match(text: str, question: str, question_terms: list[str]) -> float:
     lowered_text = text.lower()
     text_terms = tokenize_terms(text)
     if not text_terms:
@@ -195,8 +216,7 @@ def score_text_match(text, question, question_terms):
     )
 
 
-def select_relevant_chunks(context, question):
-    """Retrieves the most relevant chunks before running QA."""
+def select_relevant_chunks(context: str, question: str) -> list[str]:
     question_terms = tokenize_terms(question)
     chunks = chunk_text(context)
     scored_chunks = []
@@ -213,73 +233,19 @@ def select_relevant_chunks(context, question):
     return [chunk for _, chunk in scored_chunks[:TOP_RETRIEVAL_CHUNKS]]
 
 
-def split_sentences(text):
+def split_sentences(text: str) -> list[str]:
     parts = re.split(r"(?<=[.!?])\s+|\n+", text)
     return [part.strip() for part in parts if part.strip()]
 
 
-def term_coverage(text, question_terms):
-    if not question_terms:
-        return 0.0
-
-    text_terms = set(tokenize_terms(text))
-    if not text_terms:
-        return 0.0
-
-    matched = sum(1 for term in question_terms if term in text_terms)
-    return matched / len(question_terms)
-
-
-def best_matching_sentence(context, question):
-    """Finds the most relevant sentence and expands short heading-like matches."""
-    question_terms = tokenize_terms(question)
-    sentences = split_sentences(context)
-    best_sentence = ""
-    best_score = 0.0
-    best_index = -1
-
-    for index, sentence in enumerate(sentences):
-        score = score_text_match(sentence, question, question_terms)
-        if score > best_score:
-            best_sentence = sentence
-            best_score = score
-            best_index = index
-
-    if best_index >= 0 and len(best_sentence) < 90 and best_index + 1 < len(sentences):
-        next_sentence = sentences[best_index + 1]
-        combined = f"{best_sentence} {next_sentence}".strip()
-        combined_score = score_text_match(combined, question, question_terms)
-        if combined_score >= best_score:
-            best_sentence = combined
-            best_score = combined_score
-
-    return best_sentence, best_score
-
-
-def answer_is_low_signal(answer, raw_question):
-    cleaned = answer.strip().lower().strip(".,:;!?")
-    if cleaned in LOW_SIGNAL_ANSWERS:
-        return True
-
-    if len(cleaned) < 3:
-        return True
-
-    question_terms = set(tokenize_terms(raw_question))
-    answer_terms = set(tokenize_terms(cleaned))
-    if answer_terms and answer_terms.issubset(question_terms) and len(answer_terms) <= 2:
-        return True
-
-    return False
-
-
-def sentence_with_answer(chunk, answer):
+def sentence_with_answer(chunk: str, answer: str) -> str:
     for sentence in split_sentences(chunk):
         if answer.lower() in sentence.lower():
             return sentence
     return answer
 
 
-def run_qa_on_chunk(chunk, question):
+def run_qa_on_chunk(chunk: str, question: str):
     tokenizer, model = load_qa_model()
     encoded = tokenizer(
         question,
@@ -331,7 +297,6 @@ def run_qa_on_chunk(chunk, question):
 
                 answer_score = start_logits[start_index].item() + end_logits[end_index].item()
                 score_margin = answer_score - null_score
-
                 candidate = {
                     "answer": answer,
                     "score": answer_score,
@@ -345,21 +310,18 @@ def run_qa_on_chunk(chunk, question):
     return best_candidate
 
 
-def ask_question(context, raw_question):
-    """Retrieves relevant context, runs QA, and falls back to a relevant sentence."""
+def confidence_label(margin: float) -> str:
+    if margin >= 8:
+        return "Strong"
+    if margin >= 4:
+        return "Moderate"
+    return "Tentative"
+
+
+def ask_question(context: str, raw_question: str) -> dict:
     normalized = normalize_question(raw_question)
     normalized_terms = tokenize_terms(normalized)
     relevant_chunks = select_relevant_chunks(context, normalized)
-
-    keyword_sentence, keyword_score = best_matching_sentence(context, raw_question)
-    question_terms = tokenize_terms(raw_question)
-    keyword_coverage = term_coverage(keyword_sentence, question_terms)
-    keyword_like_query = (
-        raw_question.strip()
-        and not raw_question.strip().endswith("?")
-        and not any(word in raw_question.lower().split() for word in QUESTION_WORDS)
-        and len(question_terms) <= 6
-    )
 
     best_candidate = None
 
@@ -375,93 +337,130 @@ def ask_question(context, raw_question):
         if best_candidate is None or candidate["combined_score"] > best_candidate["combined_score"]:
             best_candidate = candidate
 
-    if keyword_like_query and keyword_sentence and keyword_score >= 4.0:
-        if best_candidate is None:
-            return keyword_sentence
+    if best_candidate is None:
+        return {
+            "answer": "No confident transformer answer found for that question.",
+            "snippet": "",
+            "confidence": "Unavailable",
+            "margin": None,
+            "found": False,
+        }
 
-        candidate_text = best_candidate["snippet"]
-        candidate_coverage = term_coverage(candidate_text, question_terms)
-        exact_phrase_in_keyword = raw_question.lower() in keyword_sentence.lower()
-        exact_phrase_in_candidate = raw_question.lower() in candidate_text.lower()
-
-        if answer_is_low_signal(best_candidate["answer"], raw_question):
-            return keyword_sentence
-        if exact_phrase_in_keyword and not exact_phrase_in_candidate:
-            return keyword_sentence
-        if keyword_coverage > candidate_coverage and best_candidate["margin"] < 5.0:
-            return keyword_sentence
-        if keyword_coverage >= 0.75 and best_candidate["margin"] < 3.5:
-            return keyword_sentence
-
-    if best_candidate and not answer_is_low_signal(best_candidate["answer"], raw_question):
-        if len(best_candidate["answer"].split()) <= 3 and len(best_candidate["snippet"]) <= 240:
-            return best_candidate["snippet"]
-        return best_candidate["answer"]
-
-    if keyword_sentence:
-        return keyword_sentence
-
-    return "No confident answer found."
+    return {
+        "answer": best_candidate["answer"],
+        "snippet": best_candidate["snippet"],
+        "confidence": confidence_label(best_candidate["margin"]),
+        "margin": best_candidate["margin"],
+        "found": True,
+    }
 
 
-def main():
-    st.set_page_config(page_title="Document QA System", page_icon="DOC", layout="wide")
-    st.markdown(
-        """
-        <h1 style='text-align: center; color: #4B0082;'>Document Question Answering System</h1>
-        <p style='text-align: center; color: #6A5ACD;'>Upload a PDF or TXT file and ask questions about its content.</p>
-        """,
-        unsafe_allow_html=True,
+def extract_keywords(text: str, limit: int = KEYWORD_LIMIT) -> list[str]:
+    counts = Counter(token for token in tokenize_terms(text) if len(token) > 3)
+    return [token for token, _ in counts.most_common(limit)]
+
+
+def build_extractive_snapshot(text: str, sentence_limit: int = SUMMARY_SENTENCES) -> list[str]:
+    sentences = split_sentences(text)
+    if not sentences:
+        return []
+
+    focus_window = sentences[: min(len(sentences), 40)]
+    term_counts = Counter(tokenize_terms(" ".join(focus_window)))
+    scored = []
+
+    for index, sentence in enumerate(focus_window):
+        terms = tokenize_terms(sentence)
+        if not terms:
+            continue
+
+        density = sum(term_counts[term] for term in terms)
+        length_penalty = abs(len(sentence) - 170) / 170
+        position_bonus = max(0, 6 - index) * 0.5
+        score = density + position_bonus - length_penalty
+        scored.append((score, index, sentence))
+
+    top_sentences = sorted(scored, reverse=True)[:sentence_limit]
+    return [sentence for _, _, sentence in sorted(top_sentences, key=lambda item: item[1])]
+
+
+def serialize_document(document: StoredDocument) -> dict:
+    return {
+        "document_id": document.document_id,
+        "name": document.name,
+        "type": document.doc_type,
+        "page_count": document.page_count,
+        "word_count": document.word_count,
+        "read_minutes": document.read_minutes,
+        "snapshot_sentences": document.snapshot_sentences,
+        "keywords": document.keywords,
+        "preview_url": f"/api/document/{document.document_id}/file",
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.post("/api/upload")
+async def upload_document(file: UploadFile = File(...)):
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+
+    parsed = parse_document(file.filename or "document", file.content_type or "", file_bytes)
+    if not parsed["text"]:
+        raise HTTPException(status_code=400, detail="The uploaded file did not produce readable text.")
+
+    document_id = str(uuid.uuid4())
+    stored = StoredDocument(
+        document_id=document_id,
+        name=parsed["name"],
+        media_type=file.content_type or "application/octet-stream",
+        file_bytes=file_bytes,
+        text=parsed["text"],
+        page_count=parsed["page_count"],
+        word_count=parsed["word_count"],
+        read_minutes=parsed["read_minutes"],
+        doc_type=parsed["type"],
+        snapshot_sentences=build_extractive_snapshot(parsed["text"]),
+        keywords=extract_keywords(parsed["text"]),
+    )
+    documents[document_id] = stored
+    return JSONResponse(serialize_document(stored))
+
+
+@app.post("/api/ask")
+async def ask_document_question(payload: AskRequest):
+    document = documents.get(payload.document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found. Upload the file again.")
+    if not payload.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    result = ask_question(document.text, payload.question)
+    return JSONResponse(
+        {
+            "question": payload.question,
+            "result": result,
+            "snapshot_sentences": document.snapshot_sentences,
+            "keywords": document.keywords,
+        }
     )
 
-    uploaded_file = st.file_uploader("Upload a PDF or TXT file:", type=["pdf", "txt"], key="file_uploader")
 
-    if not uploaded_file:
-        return
+@app.get("/api/document/{document_id}/file")
+async def preview_document_file(document_id: str):
+    document = documents.get(document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
 
-    if uploaded_file.type == "application/pdf":
-        text = read_pdf(uploaded_file)
-    else:
-        text = normalize_text(uploaded_file.read().decode("utf-8"))
-
-    chapters = split_chapters(text)
-
-    st.sidebar.header("Chapters in Document")
-    if chapters:
-        for chapter in chapters:
-            st.sidebar.write(chapter)
-    else:
-        st.sidebar.write("No chapter headings detected.")
-
-    st.markdown("### Ask a Question About Your Document")
-    question = st.text_input(
-        "Enter your question here:",
-        placeholder="Example: What is the sigmoid function?",
-    )
-
-    if not question:
-        return
-
-    chapter_match = re.search(r"Chapter (\d+)", question, re.IGNORECASE)
-    if chapter_match:
-        chapter_key = f"Chapter {chapter_match.group(1)}"
-        context = chapters.get(chapter_key, text)
-    else:
-        context = text
-
-    with st.spinner("Finding the best answer..."):
-        answer = ask_question(context, question)
-
-    st.markdown(
-        f"""
-        <div style='background-color:#E6E6FA; padding:15px; border-radius:10px;'>
-            <h3 style='color:#4B0082;'>Answer:</h3>
-            <p style='font-size:18px; color:#333;'>{answer}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    headers = {"Content-Disposition": f'inline; filename="{document.name}"'}
+    return StreamingResponse(io.BytesIO(document.file_bytes), media_type=document.media_type, headers=headers)
 
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
